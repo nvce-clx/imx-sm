@@ -1,0 +1,2324 @@
+/*
+** ###################################################################
+**
+** Copyright 2023-2026 NXP
+**
+** Redistribution and use in source and binary forms, with or without modification,
+** are permitted provided that the following conditions are met:
+**
+** o Redistributions of source code must retain the above copyright notice, this list
+**   of conditions and the following disclaimer.
+**
+** o Redistributions in binary form must reproduce the above copyright notice, this
+**   list of conditions and the following disclaimer in the documentation and/or
+**   other materials provided with the distribution.
+**
+** o Neither the name of the copyright holder nor the names of its
+**   contributors may be used to endorse or promote products derived from this
+**   software without specific prior written permission.
+**
+** THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+** ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+** WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+** DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+** ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+** (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+** LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+** ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+** (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+** SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+**
+**
+** ###################################################################
+*/
+
+/*==========================================================================*/
+/* File containing the implementation of the System Control and Management  */
+/* Interface (SCMI) misc protocol.                                          */
+/*==========================================================================*/
+
+/* Includes */
+
+#include "rpc_scmi_internal.h"
+#include "lmm.h"
+
+/* Local defines */
+
+/* Protocol version */
+#define PROTOCOL_VERSION  0x10001U
+
+/* SCMI misc protocol message IDs and masks */
+#define COMMAND_PROTOCOL_VERSION             0x0U
+#define COMMAND_PROTOCOL_ATTRIBUTES          0x1U
+#define COMMAND_PROTOCOL_MESSAGE_ATTRIBUTES  0x2U
+#define COMMAND_MISC_CONTROL_SET             0x3U
+#define COMMAND_MISC_CONTROL_GET             0x4U
+#define COMMAND_MISC_CONTROL_ACTION          0x5U
+#define COMMAND_MISC_DISCOVER_BUILD_INFO     0x6U
+#define COMMAND_MISC_ROM_PASSOVER_GET        0x7U
+#define COMMAND_MISC_CONTROL_NOTIFY          0x8U
+#define COMMAND_MISC_REASON_ATTRIBUTES       0x9U
+#define COMMAND_MISC_RESET_REASON            0xAU
+#define COMMAND_MISC_SI_INFO                 0xBU
+#define COMMAND_MISC_CFG_INFO                0xCU
+#define COMMAND_MISC_SYSLOG                  0xDU
+#define COMMAND_MISC_BOARD_INFO              0xEU
+#define COMMAND_NEGOTIATE_PROTOCOL_VERSION   0x10U
+#define COMMAND_MISC_CONTROL_EXT_SET         0x20U
+#define COMMAND_MISC_CONTROL_EXT_GET         0x21U
+#define COMMAND_MISC_DDR_INFO_GET            0x22U
+#define COMMAND_SUPPORTED_MASK               0x700017FFFULL
+
+/* SCMI max misc argument lengths */
+#define MISC_MAX_BUILDDATE  16U
+#define MISC_MAX_BUILDTIME  16U
+#define MISC_MAX_NAME       16U
+#define MISC_MAX_SINAME     16U
+#define MISC_MAX_CFGNAME    16U
+#define MISC_MAX_BRDNAME    16U
+#define MISC_MAX_VAL_T      SCMI_ARRAY(8U, uint32_t)
+#define MISC_MAX_EXTVAL_T   SCMI_ARRAY(16U, uint32_t)
+#define MISC_MAX_VAL        SCMI_ARRAY(8U, uint32_t)
+#define MISC_MAX_EXTVAL     SCMI_ARRAY(16U, uint32_t)
+#define MISC_MAX_ARG_T      SCMI_ARRAY(12U, uint32_t)
+#define MISC_MAX_RTN        SCMI_ARRAY(8U, uint32_t)
+#define MISC_MAX_PASSOVER   SCMI_ARRAY(8U, uint32_t)
+#define MISC_MAX_EXTINFO    SCMI_ARRAY(16U, uint32_t)
+#define MISC_MAX_SYSLOG     SCMI_ARRAY(8U, uint32_t)
+
+/* SCMI Control ID Flags */
+#define MISC_CTRL_FLAG_BRD  0x8000U
+
+/* Type of DDR */
+#define MISC_DDR_TYPE_LPDDR5   0
+#define MISC_DDR_TYPE_LPDDR5X  1
+#define MISC_DDR_TYPE_LPDDR4   2
+#define MISC_DDR_TYPE_LPDDR4X  3
+
+/* Local macros */
+
+/* SCMI misc protocol attributes */
+#define MISC_PROTO_ATTR_NUM_BRD_CTRL(x)  (((x) & 0xFFU) << 24U)
+#define MISC_PROTO_ATTR_NUM_REASON(x)    (((x) & 0xFFU) << 16U)
+#define MISC_PROTO_ATTR_NUM_DEV_CTRL(x)  (((x) & 0xFFFFU) << 0U)
+
+/* SCMI reason flags */
+#define MISC_REASON_FLAG_SYSTEM(x)  (((x) & 0x1U) >> 0U)
+
+/* SCMI boot reason flags */
+#define MISC_BOOT_FLAG_VLD(x)      (((x) & 0x1U) << 31U)
+#define MISC_BOOT_FLAG_ORG_VLD(x)  (((x) & 0x1U) << 28U)
+#define MISC_BOOT_FLAG_ORIGIN(x)   (((x) & 0xFU) << 24U)
+#define MISC_BOOT_FLAG_ERR_VLD(x)  (((x) & 0x1U) << 23U)
+#define MISC_BOOT_FLAG_ERR_ID(x)   (((x) & 0x7FFFU) << 8U)
+#define MISC_BOOT_FLAG_REASON(x)   (((x) & 0xFFU) << 0U)
+
+/* SCMI shutdown reason flags */
+#define MISC_SHUTDOWN_FLAG_VLD(x)      (((x) & 0x1U) << 31U)
+#define MISC_SHUTDOWN_FLAG_EXT_LEN(x)  (((x) & 0x3U) << 29U)
+#define MISC_SHUTDOWN_FLAG_ORG_VLD(x)  (((x) & 0x1U) << 28U)
+#define MISC_SHUTDOWN_FLAG_ORIGIN(x)   (((x) & 0xFU) << 24U)
+#define MISC_SHUTDOWN_FLAG_ERR_VLD(x)  (((x) & 0x1U) << 23U)
+#define MISC_SHUTDOWN_FLAG_ERR_ID(x)   (((x) & 0x7FFFU) << 8U)
+#define MISC_SHUTDOWN_FLAG_REASON(x)   (((x) & 0xFFU) << 0U)
+
+/* SCMI misc num log flags */
+#define MISC_NUM_LOG_FLAGS_REMAING_LOGS(x)  (((x) & 0xFFFU) << 20U)
+#define MISC_NUM_LOG_FLAGS_NUM_LOGS(x)      (((x) & 0xFFFU) << 0U)
+
+/* SCMI DDR memory region attributes */
+#define MISC_DDR_ATTR_ECC(x)      (((x) & 0x1U) << 31U)
+#define MISC_DDR_ATTR_NUM_RGD(x)  (((x) & 0x3U) << 16U)
+#define MISC_DDR_ATTR_WIDTH(x)    (((x) & 0x7U) << 8U)
+#define MISC_DDR_ATTR_TYPE(x)     (((x) & 0x1FU) << 0U)
+
+/* Local types */
+
+/* Response type for ProtocolVersion() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Return status */
+    int32_t status;
+    /* Protocol version */
+    uint32_t version;
+} msg_tmisc0_t;
+
+/* Response type for ProtocolAttributes() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Return status */
+    int32_t status;
+    /* Protocol attributes */
+    uint32_t attributes;
+} msg_tmisc1_t;
+
+/* Request type for ProtocolMessageAttributes() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* message ID of the message */
+    uint32_t messageId;
+} msg_rmisc2_t;
+
+/* Response type for ProtocolMessageAttributes() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Return status */
+    int32_t status;
+    /* Message attributes */
+    uint32_t attributes;
+} msg_tmisc2_t;
+
+/* Request type for MiscControlSet() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Identifier for the control */
+    uint32_t ctrlId;
+    /* Size of the value data */
+    uint32_t numVal;
+    /* Value data array */
+    uint32_t val[MISC_MAX_VAL_T];
+} msg_rmisc3_t;
+
+/* Request type for MiscControlGet() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Identifier for the control */
+    uint32_t ctrlId;
+} msg_rmisc4_t;
+
+/* Response type for MiscControlGet() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Return status */
+    int32_t status;
+    /* Size of the return data in words */
+    uint32_t numVal;
+    /* Return data array */
+    uint32_t val[MISC_MAX_VAL];
+} msg_tmisc4_t;
+
+/* Request type for MiscControlAction() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Identifier for the control */
+    uint32_t ctrlId;
+    /* Action for the control */
+    uint32_t action;
+    /* Size of the argument data */
+    uint32_t numArg;
+    /* Argument data array */
+    uint32_t arg[MISC_MAX_ARG_T];
+} msg_rmisc5_t;
+
+/* Response type for MiscControlAction() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Return status */
+    int32_t status;
+    /* Size of the return data in words */
+    uint32_t numRtn;
+    /* Return data array */
+    uint32_t rtn[MISC_MAX_RTN];
+} msg_tmisc5_t;
+
+/* Response type for MiscDiscoverBuildInfo() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Return status */
+    int32_t status;
+    /* Build number */
+    uint32_t buildNum;
+    /* Most significant 32 bits of the git commit hash */
+    uint32_t buildCommit;
+    /* Date of build */
+    uint8_t buildDate[MISC_MAX_BUILDDATE];
+    /* Time of build */
+    uint8_t buildTime[MISC_MAX_BUILDTIME];
+} msg_tmisc6_t;
+
+/* Response type for MiscRomPassoverGet() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Return status */
+    int32_t status;
+    /* Size of the passover data in words */
+    uint32_t numPassover;
+    /* Passover data array */
+    uint32_t passover[MISC_MAX_PASSOVER];
+} msg_tmisc7_t;
+
+/* Request type for MiscControlNotify() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Identifier for the control */
+    uint32_t ctrlId;
+    /* Notification flags, varies by control */
+    uint32_t flags;
+} msg_rmisc8_t;
+
+/* Request type for MiscReasonAttributes() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Identifier for the reason */
+    uint32_t reasonId;
+} msg_rmisc9_t;
+
+/* Response type for MiscReasonAttributes() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Return status */
+    int32_t status;
+    /* Reason attributes */
+    uint32_t attributes;
+    /* ASCII name string */
+    uint8_t name[MISC_MAX_NAME];
+} msg_tmisc9_t;
+
+/* Request type for MiscResetReason() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Reason flags */
+    uint32_t flags;
+} msg_rmisc10_t;
+
+/* Response type for MiscResetReason() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Return status */
+    int32_t status;
+    /* Boot reason flags */
+    uint32_t bootFlags;
+    /* Shutdown reason flags */
+    uint32_t shutdownFlags;
+    /* Array of extended info words */
+    uint32_t extInfo[MISC_MAX_EXTINFO];
+} msg_tmisc10_t;
+
+/* Response type for MiscSiInfo() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Return status */
+    int32_t status;
+    /* Silicon specific device ID */
+    uint32_t deviceId;
+    /* Silicon specific revision */
+    uint32_t siRev;
+    /* Silicon specific part number */
+    uint32_t partNum;
+    /* Silicon name/revision */
+    uint8_t siName[MISC_MAX_SINAME];
+} msg_tmisc11_t;
+
+/* Response type for MiscCfgInfo() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Return status */
+    int32_t status;
+    /* Mode selector value */
+    uint32_t mSel;
+    /* Config (cfg) file basename */
+    uint8_t cfgName[MISC_MAX_CFGNAME];
+} msg_tmisc12_t;
+
+/* Request type for MiscSyslog() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Device specific flags that might impact the data returned or clearing of the data */
+    uint32_t flags;
+    /* Index to the first log word */
+    uint32_t logIndex;
+} msg_rmisc13_t;
+
+/* Response type for MiscSyslog() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Return status */
+    int32_t status;
+    /* Descriptor for the log data returned by this call */
+    uint32_t numLogFlags;
+    /* Log data array */
+    uint32_t syslog[MISC_MAX_SYSLOG];
+} msg_tmisc13_t;
+
+/* Response type for MiscBoardInfo() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Return status */
+    int32_t status;
+    /* Board specific attributes */
+    uint32_t attributes;
+    /* Board name */
+    uint8_t brdName[MISC_MAX_BRDNAME];
+} msg_tmisc14_t;
+
+/* Request type for NegotiateProtocolVersion() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* The negotiated protocol version the agent intends to use */
+    uint32_t version;
+} msg_rmisc16_t;
+
+/* Request type for MiscControlExtSet() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Identifier for the control */
+    uint32_t ctrlId;
+    /* Address of the control set */
+    uint32_t addr;
+    /* Requested size of the set */
+    uint32_t len;
+    /* Size of the value data */
+    uint32_t numVal;
+    /* Value data array */
+    uint32_t extVal[MISC_MAX_EXTVAL_T];
+} msg_rmisc32_t;
+
+/* Request type for MiscControlExtGet() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Identifier for the control */
+    uint32_t ctrlId;
+    /* Address of the control get */
+    uint32_t addr;
+    /* Requested size of the get */
+    uint32_t len;
+} msg_rmisc33_t;
+
+/* Response type for MiscControlExtGet() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Return status */
+    int32_t status;
+    /* Size of the return data in words */
+    uint32_t numVal;
+    /* Return data array */
+    uint32_t extVal[MISC_MAX_EXTVAL];
+} msg_tmisc33_t;
+
+/* Request type for MiscDdrInfoGet() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Identifier for the DDR memory region */
+    uint32_t ddrRgdId;
+} msg_rmisc34_t;
+
+/* Response type for MiscDdrInfoGet() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Return status */
+    int32_t status;
+    /* Region attributes */
+    uint32_t attributes;
+    /* DDR speed in megatransfers per second */
+    uint32_t mts;
+    /* Low address */
+    uint32_t startLow;
+    /* High address */
+    uint32_t startHigh;
+    /* Low address */
+    uint32_t endLow;
+    /* High address */
+    uint32_t endHigh;
+} msg_tmisc34_t;
+
+/* Request type for MiscControlEvent() */
+typedef struct
+{
+    /* Header word */
+    uint32_t header;
+    /* Identifier for the control that caused the event */
+    uint32_t ctrlId;
+    /* Event flags, varies by control */
+    uint32_t flags;
+} msg_rmisc64_t;
+
+/* Local functions */
+
+static int32_t MiscProtocolVersion(const scmi_caller_t *caller,
+    const scmi_msg_header_t *in, msg_tmisc0_t *out);
+static int32_t MiscProtocolAttributes(const scmi_caller_t *caller,
+    const scmi_msg_header_t *in, msg_tmisc1_t *out);
+static int32_t MiscProtocolMessageAttributes(const scmi_caller_t *caller,
+    const msg_rmisc2_t *in, msg_tmisc2_t *out);
+static int32_t MiscControlSet(const scmi_caller_t *caller,
+    const msg_rmisc3_t *in, const scmi_msg_status_t *out);
+static int32_t MiscControlGet(const scmi_caller_t *caller,
+    const msg_rmisc4_t *in, msg_tmisc4_t *out, uint32_t *len);
+static int32_t MiscControlAction(const scmi_caller_t *caller,
+    const msg_rmisc5_t *in, msg_tmisc5_t *out, uint32_t *len);
+static int32_t MiscDiscoverBuildInfo(const scmi_caller_t *caller,
+    const scmi_msg_header_t *in, msg_tmisc6_t *out);
+static int32_t MiscRomPassoverGet(const scmi_caller_t *caller,
+    const scmi_msg_header_t *in, msg_tmisc7_t *out, uint32_t *len);
+static int32_t MiscControlNotify(const scmi_caller_t *caller,
+    const msg_rmisc8_t *in, const scmi_msg_status_t *out);
+static int32_t MiscReasonAttributes(const scmi_caller_t *caller,
+    const msg_rmisc9_t *in, msg_tmisc9_t *out);
+static int32_t MiscResetReason(const scmi_caller_t *caller,
+    const msg_rmisc10_t *in, msg_tmisc10_t *out, uint32_t *len);
+static int32_t MiscSiInfo(const scmi_caller_t *caller,
+    const scmi_msg_header_t *in, msg_tmisc11_t *out);
+static int32_t MiscCfgInfo(const scmi_caller_t *caller,
+    const scmi_msg_header_t *in, msg_tmisc12_t *out);
+static int32_t MiscSyslog(const scmi_caller_t *caller,
+    const msg_rmisc13_t *in, msg_tmisc13_t *out, uint32_t *len);
+static int32_t MiscBoardInfo(const scmi_caller_t *caller,
+    const scmi_msg_header_t *in, msg_tmisc14_t *out);
+static int32_t MiscNegotiateProtocolVersion(const scmi_caller_t *caller,
+    const msg_rmisc16_t *in, const scmi_msg_status_t *out);
+static int32_t MiscControlExtSet(const scmi_caller_t *caller,
+    const msg_rmisc32_t *in, const scmi_msg_status_t *out);
+static int32_t MiscControlExtGet(const scmi_caller_t *caller,
+    const msg_rmisc33_t *in, msg_tmisc33_t *out, uint32_t *len);
+static int32_t MiscDdrInfoGet(const scmi_caller_t *caller,
+    const msg_rmisc34_t *in, msg_tmisc34_t *out);
+static int32_t MiscControlEvent(scmi_msg_id_t msgId,
+    const lmm_rpc_trigger_t *trigger);
+static int32_t MiscResetAgentConfig(uint32_t lmId, uint32_t agentId,
+    bool permissionsReset);
+
+/*--------------------------------------------------------------------------*/
+/* Dispatch SCMI command                                                    */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - messageId: Message ID to dispatch                                      */
+/*--------------------------------------------------------------------------*/
+int32_t RPC_SCMI_MiscDispatchCommand(scmi_caller_t *caller,
+    uint32_t messageId)
+{
+    int32_t status = SM_ERR_SUCCESS;
+    const scmi_msg_t *in = caller->msgCopy;
+    /* coverity[null_field:FALSE] - check by single caller */
+    scmi_msg_status_t *out = caller->msg;
+    uint32_t lenOut = sizeof(scmi_msg_status_t);
+
+    /* Handle standard messages */
+    switch (messageId)
+    {
+        case COMMAND_PROTOCOL_VERSION:
+            lenOut = sizeof(msg_tmisc0_t);
+            status = MiscProtocolVersion(caller,
+                /* Pointer coversion required from comm buffer */
+                /* coverity[misra_c_2012_rule_11_3_violation] */
+                (const scmi_msg_header_t*) in, (msg_tmisc0_t*) out);
+            break;
+        case COMMAND_PROTOCOL_ATTRIBUTES:
+            lenOut = sizeof(msg_tmisc1_t);
+            status = MiscProtocolAttributes(caller,
+                /* Pointer coversion required from comm buffer */
+                /* coverity[misra_c_2012_rule_11_3_violation] */
+                (const scmi_msg_header_t*) in, (msg_tmisc1_t*) out);
+            break;
+        case COMMAND_PROTOCOL_MESSAGE_ATTRIBUTES:
+            lenOut = sizeof(msg_tmisc2_t);
+            status = MiscProtocolMessageAttributes(caller,
+                /* Pointer coversion required from comm buffer */
+                /* coverity[misra_c_2012_rule_11_3_violation] */
+                (const msg_rmisc2_t*) in, (msg_tmisc2_t*) out);
+            break;
+        case COMMAND_MISC_CONTROL_SET:
+            lenOut = sizeof(const scmi_msg_status_t);
+            /* Pointer coversion required from comm buffer */
+            /* coverity[misra_c_2012_rule_11_3_violation] */
+            status = MiscControlSet(caller, (const msg_rmisc3_t*) in,
+                /* Pointer coversion required from comm buffer */
+                /* coverity[misra_c_2012_rule_11_3_violation] */
+                (const scmi_msg_status_t*) out);
+            break;
+        case COMMAND_MISC_CONTROL_GET:
+            lenOut = sizeof(msg_tmisc4_t);
+            /* Pointer coversion required from comm buffer */
+            /* coverity[misra_c_2012_rule_11_3_violation] */
+            status = MiscControlGet(caller, (const msg_rmisc4_t*) in,
+                /* Pointer coversion required from comm buffer */
+                /* coverity[misra_c_2012_rule_11_3_violation] */
+                (msg_tmisc4_t*) out, &lenOut);
+            break;
+        case COMMAND_MISC_CONTROL_ACTION:
+            lenOut = sizeof(msg_tmisc5_t);
+            /* Pointer coversion required from comm buffer */
+            /* coverity[misra_c_2012_rule_11_3_violation] */
+            status = MiscControlAction(caller, (const msg_rmisc5_t*) in,
+                /* Pointer coversion required from comm buffer */
+                /* coverity[misra_c_2012_rule_11_3_violation] */
+                (msg_tmisc5_t*) out, &lenOut);
+            break;
+        case COMMAND_MISC_DISCOVER_BUILD_INFO:
+            lenOut = sizeof(msg_tmisc6_t);
+            status = MiscDiscoverBuildInfo(caller,
+                /* Pointer coversion required from comm buffer */
+                /* coverity[misra_c_2012_rule_11_3_violation] */
+                (const scmi_msg_header_t*) in, (msg_tmisc6_t*) out);
+            break;
+        case COMMAND_MISC_ROM_PASSOVER_GET:
+            lenOut = sizeof(msg_tmisc7_t);
+            /* Pointer coversion required from comm buffer */
+            /* coverity[misra_c_2012_rule_11_3_violation] */
+            status = MiscRomPassoverGet(caller, (const scmi_msg_header_t*) in,
+                /* Pointer coversion required from comm buffer */
+                /* coverity[misra_c_2012_rule_11_3_violation] */
+                (msg_tmisc7_t*) out, &lenOut);
+            break;
+        case COMMAND_MISC_CONTROL_NOTIFY:
+            lenOut = sizeof(const scmi_msg_status_t);
+            /* Pointer coversion required from comm buffer */
+            /* coverity[misra_c_2012_rule_11_3_violation] */
+            status = MiscControlNotify(caller, (const msg_rmisc8_t*) in,
+                /* Pointer coversion required from comm buffer */
+                /* coverity[misra_c_2012_rule_11_3_violation] */
+                (const scmi_msg_status_t*) out);
+            break;
+        case COMMAND_MISC_REASON_ATTRIBUTES:
+            lenOut = sizeof(msg_tmisc9_t);
+            /* Pointer coversion required from comm buffer */
+            /* coverity[misra_c_2012_rule_11_3_violation] */
+            status = MiscReasonAttributes(caller, (const msg_rmisc9_t*) in,
+                /* Pointer coversion required from comm buffer */
+                /* coverity[misra_c_2012_rule_11_3_violation] */
+                (msg_tmisc9_t*) out);
+            break;
+        case COMMAND_MISC_RESET_REASON:
+            lenOut = sizeof(msg_tmisc10_t);
+            /* Pointer coversion required from comm buffer */
+            /* coverity[misra_c_2012_rule_11_3_violation] */
+            status = MiscResetReason(caller, (const msg_rmisc10_t*) in,
+                /* Pointer coversion required from comm buffer */
+                /* coverity[misra_c_2012_rule_11_3_violation] */
+                (msg_tmisc10_t*) out, &lenOut);
+            break;
+        case COMMAND_MISC_SI_INFO:
+            lenOut = sizeof(msg_tmisc11_t);
+            /* Pointer coversion required from comm buffer */
+            /* coverity[misra_c_2012_rule_11_3_violation] */
+            status = MiscSiInfo(caller, (const scmi_msg_header_t*) in,
+                /* Pointer coversion required from comm buffer */
+                /* coverity[misra_c_2012_rule_11_3_violation] */
+                (msg_tmisc11_t*) out);
+            break;
+        case COMMAND_MISC_CFG_INFO:
+            lenOut = sizeof(msg_tmisc12_t);
+            /* Pointer coversion required from comm buffer */
+            /* coverity[misra_c_2012_rule_11_3_violation] */
+            status = MiscCfgInfo(caller, (const scmi_msg_header_t*) in,
+                /* Pointer coversion required from comm buffer */
+                /* coverity[misra_c_2012_rule_11_3_violation] */
+                (msg_tmisc12_t*) out);
+            break;
+        case COMMAND_MISC_SYSLOG:
+            lenOut = sizeof(msg_tmisc13_t);
+            /* Pointer coversion required from comm buffer */
+            /* coverity[misra_c_2012_rule_11_3_violation] */
+            status = MiscSyslog(caller, (const msg_rmisc13_t*) in,
+                /* Pointer coversion required from comm buffer */
+                /* coverity[misra_c_2012_rule_11_3_violation] */
+                (msg_tmisc13_t*) out, &lenOut);
+            break;
+        case COMMAND_MISC_BOARD_INFO:
+            lenOut = sizeof(msg_tmisc14_t);
+            /* Pointer coversion required from comm buffer */
+            /* coverity[misra_c_2012_rule_11_3_violation] */
+            status = MiscBoardInfo(caller, (const scmi_msg_header_t*) in,
+                /* Pointer coversion required from comm buffer */
+                /* coverity[misra_c_2012_rule_11_3_violation] */
+                (msg_tmisc14_t*) out);
+            break;
+        case COMMAND_NEGOTIATE_PROTOCOL_VERSION:
+            lenOut = sizeof(const scmi_msg_status_t);
+            status = MiscNegotiateProtocolVersion(caller,
+                /* Pointer coversion required from comm buffer */
+                /* coverity[misra_c_2012_rule_11_3_violation] */
+                (const msg_rmisc16_t*) in, (const scmi_msg_status_t*) out);
+            break;
+        case COMMAND_MISC_CONTROL_EXT_SET:
+            lenOut = sizeof(const scmi_msg_status_t);
+            /* Pointer coversion required from comm buffer */
+            /* coverity[misra_c_2012_rule_11_3_violation] */
+            status = MiscControlExtSet(caller, (const msg_rmisc32_t*) in,
+                /* Pointer coversion required from comm buffer */
+                /* coverity[misra_c_2012_rule_11_3_violation] */
+                (const scmi_msg_status_t*) out);
+            break;
+        case COMMAND_MISC_CONTROL_EXT_GET:
+            lenOut = sizeof(msg_tmisc33_t);
+            /* Pointer coversion required from comm buffer */
+            /* coverity[misra_c_2012_rule_11_3_violation] */
+            status = MiscControlExtGet(caller, (const msg_rmisc33_t*) in,
+                /* Pointer coversion required from comm buffer */
+                /* coverity[misra_c_2012_rule_11_3_violation] */
+                (msg_tmisc33_t*) out, &lenOut);
+            break;
+        case COMMAND_MISC_DDR_INFO_GET:
+            lenOut = sizeof(msg_tmisc34_t);
+            /* Pointer coversion required from comm buffer */
+            /* coverity[misra_c_2012_rule_11_3_violation] */
+            status = MiscDdrInfoGet(caller, (const msg_rmisc34_t*) in,
+                /* Pointer coversion required from comm buffer */
+                /* coverity[misra_c_2012_rule_11_3_violation] */
+                (msg_tmisc34_t*) out);
+            break;
+        default:
+            status = SM_ERR_NOT_SUPPORTED;
+            break;
+    }
+
+    /* Update length */
+    caller->lenMsg = lenOut;
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Dispatch SCMI notifications                                              */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - msgId: Message ID to dispatch                                          */
+/* - trigger: Trigger data                                                  */
+/*--------------------------------------------------------------------------*/
+int32_t RPC_SCMI_MiscDispatchNotification(scmi_msg_id_t msgId,
+    const lmm_rpc_trigger_t *trigger)
+{
+    int32_t status = SM_ERR_SUCCESS;
+
+    /* Handle notifications */
+    switch (msgId.messageId)
+    {
+        case RPC_SCMI_NOTIFY_MISC_CONTROL_EVENT:
+            status = MiscControlEvent(msgId, trigger);
+            break;
+        default:
+            status = SM_ERR_NOT_SUPPORTED;
+            break;
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Dispatch SCMI reset                                                      */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - lmId: LM to reset                                                      */
+/* - agentId: Message ID to dispatch                                        */
+/* - permissionsReset: True to reset permissions                            */
+/*--------------------------------------------------------------------------*/
+int32_t RPC_SCMI_MiscDispatchReset(uint32_t lmId, uint32_t agentId,
+    bool permissionsReset)
+{
+    return MiscResetAgentConfig(lmId, agentId, permissionsReset);
+}
+
+/*==========================================================================*/
+/* Custom Protocol Implementation                                           */
+/*==========================================================================*/
+
+/* Local variables */
+
+static uint32_t s_ctrlNotify[SM_NUM_CTRL][SM_SCMI_NUM_AGNT];
+
+/* Local functions */
+
+static int32_t MiscControlUpdate(uint32_t lmId, uint32_t agentId,
+    uint32_t ctrlId, uint32_t flags);
+
+/*--------------------------------------------------------------------------*/
+/* Get protocol version                                                     */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - out->version: Protocol version. For this revision of the               */
+/*   specification, this value must be 0x10001                              */
+/*                                                                          */
+/* Process the PROTOCOL_VERSION message. Platform handler for               */
+/* SCMI_MiscProtocolVersion().                                              */
+/*                                                                          */
+/* Return errors:                                                           */
+/* - SM_ERR_PROTOCOL_ERROR: if the incoming payload is too small.           */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscProtocolVersion(const scmi_caller_t *caller,
+    const scmi_msg_header_t *in, msg_tmisc0_t *out)
+{
+    int32_t status = SM_ERR_SUCCESS;
+
+    /* Check request length */
+    if (caller->lenCopy < sizeof(*in))
+    {
+        status = SM_ERR_PROTOCOL_ERROR;
+    }
+
+    /* Return data */
+    if (status == SM_ERR_SUCCESS)
+    {
+        /* Return version */
+        out->version = PROTOCOL_VERSION;
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Get protocol attributes                                                  */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - out->attributes: Protocol attributes:                                  */
+/*   Bits[31:24] Number of board controls.                                  */
+/*   Bits[23:16] Number of reasons.                                         */
+/*   Bits[15:0] Number of device controls                                   */
+/*                                                                          */
+/* Process the PROTOCOL_ATTRIBUTES message. Platform handler for            */
+/* SCMI_MiscProtocolAttributes().                                           */
+/*                                                                          */
+/*  Access macros:                                                          */
+/* - MISC_PROTO_ATTR_NUM_BRD_CTRL() - Number of board controls              */
+/* - MISC_PROTO_ATTR_NUM_REASON() - Number of reasons                       */
+/* - MISC_PROTO_ATTR_NUM_DEV_CTRL() - Number of device controls             */
+/*                                                                          */
+/* Return errors:                                                           */
+/* - SM_ERR_PROTOCOL_ERROR: if the incoming payload is too small.           */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscProtocolAttributes(const scmi_caller_t *caller,
+    const scmi_msg_header_t *in, msg_tmisc1_t *out)
+{
+    int32_t status = SM_ERR_SUCCESS;
+
+    /* Check request length */
+    if (caller->lenCopy < sizeof(*in))
+    {
+        status = SM_ERR_PROTOCOL_ERROR;
+    }
+
+    /* Return data */
+    if (status == SM_ERR_SUCCESS)
+    {
+        /* Return number of controls */
+        out->attributes
+            = MISC_PROTO_ATTR_NUM_BRD_CTRL(SM_NUM_CTRL - DEV_SM_NUM_CTRL)
+            | MISC_PROTO_ATTR_NUM_REASON(SM_NUM_REASON)
+            | MISC_PROTO_ATTR_NUM_DEV_CTRL(DEV_SM_NUM_CTRL);
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Get protocol message attributes                                          */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - in->messageId: Message ID of the message                               */
+/* - out->attributes: Message attributes. Flags that are associated with a  */
+/*   specific function in the protocol.                                     */
+/*   In the current version of the specification, this value is always 0    */
+/*                                                                          */
+/* Process the PROTOCOL_MESSAGE_ATTRIBUTES message. Platform handler for    */
+/* SCMI_MiscProtocolMessageAttributes().                                    */
+/*                                                                          */
+/* Return errors:                                                           */
+/* - SM_ERR_SUCCESS: in case the message is implemented and available to    */
+/*   use.                                                                   */
+/* - SM_ERR_NOT_FOUND: if the message identified by messageId is invalid    */
+/*   or not implemented.                                                    */
+/* - SM_ERR_PROTOCOL_ERROR: if the incoming payload is too small.           */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscProtocolMessageAttributes(const scmi_caller_t *caller,
+    const msg_rmisc2_t *in, msg_tmisc2_t *out)
+{
+    int32_t status = SM_ERR_SUCCESS;
+
+    /* Check request length */
+    if (caller->lenCopy < sizeof(*in))
+    {
+        status = SM_ERR_PROTOCOL_ERROR;
+    }
+
+    /* Return data */
+    if (status == SM_ERR_SUCCESS)
+    {
+        uint64_t mask = COMMAND_SUPPORTED_MASK;
+
+        /* Always zero */
+        out->attributes = 0U;
+
+        /* Is message supported ? */
+        if ((in->messageId >= 64U)
+            || (((mask >> in->messageId) & 0x1ULL) == 0ULL))
+        {
+            status = SM_ERR_NOT_FOUND;
+        }
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Set a control value                                                      */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - in->ctrlId: Identifier for the control                                 */
+/* - in->numVal: Size of the value data                                     */
+/* - in->val: Value data array                                              */
+/*                                                                          */
+/* Process the MISC_CONTROL_SET message. Platform handler for               */
+/* SCMI_MiscControlSet(). Requires access greater than or equal to          */
+/* EXCLUSIVE.                                                               */
+/*                                                                          */
+/* Return errors:                                                           */
+/* - SM_ERR_SUCCESS: if the control is set successfully.                    */
+/* - SM_ERR_NOT_FOUND: if ctrlId does not point to a valid control.         */
+/* - SM_ERR_DENIED: if the calling agent is not allowed to set this         */
+/*   control.                                                               */
+/* - SM_ERR_PROTOCOL_ERROR: if the incoming payload is too small.           */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscControlSet(const scmi_caller_t *caller,
+    const msg_rmisc3_t *in, const scmi_msg_status_t *out)
+{
+    int32_t status = SM_ERR_SUCCESS;
+#if (SM_NUM_CTRL - DEV_SM_NUM_CTRL) > 0
+    uint32_t uCtrlId = in->ctrlId & ~MISC_CTRL_FLAG_BRD;
+#else
+    uint32_t uCtrlId = in->ctrlId;
+#endif
+
+    /* Check the numVal */
+    if (in->numVal <= MISC_MAX_VAL_T)
+    {
+        /* Check request length */
+        if (caller->lenCopy < ((3U + in->numVal) * sizeof(uint32_t)))
+        {
+            status = SM_ERR_PROTOCOL_ERROR;
+        }
+    }
+    else
+    {
+        /* Set the status if numVal is invalid */
+        status = SM_ERR_INVALID_PARAMETERS;
+    }
+
+    /* Check and generate unified ctrlId */
+    if (status == SM_ERR_SUCCESS)
+    {
+#if (SM_NUM_CTRL - DEV_SM_NUM_CTRL) > 0
+        if ((in->ctrlId & MISC_CTRL_FLAG_BRD) == 0U)
+#endif
+        {
+            /* Check control */
+            if (uCtrlId >= DEV_SM_NUM_CTRL)
+            {
+                status = SM_ERR_NOT_FOUND;
+            }
+        }
+#if (SM_NUM_CTRL - DEV_SM_NUM_CTRL) > 0
+        else
+        {
+            /* Check control */
+            if (uCtrlId >= (SM_NUM_CTRL - DEV_SM_NUM_CTRL))
+            {
+                status = SM_ERR_NOT_FOUND;
+            }
+
+            /* Adjust to end of device controls */
+            uCtrlId += DEV_SM_NUM_CTRL;
+        }
+#endif
+    }
+
+    /* Check permissions */
+    if ((status == SM_ERR_SUCCESS)
+        && (g_scmiAgentConfig[caller->agentId].ctrlPerms[uCtrlId]
+        < SM_SCMI_PERM_EXCLUSIVE))
+    {
+        status = SM_ERR_DENIED;
+    }
+
+    /* Set control */
+    if (status == SM_ERR_SUCCESS)
+    {
+        status = LMM_MiscControlSet(caller->lmId, uCtrlId, in->numVal,
+            in->val);
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Get a control value                                                      */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - in->ctrlId: Identifier for the control                                 */
+/* - out->numVal: Size of the return data in words                          */
+/* - out->val: Return data array                                            */
+/* - len: Pointer to length (can modify)                                    */
+/*                                                                          */
+/* Process the MISC_CONTROL_GET message. Platform handler for               */
+/* SCMI_MiscControlGet(). Requires access greater than or equal to GET.     */
+/*                                                                          */
+/* Return errors:                                                           */
+/* - SM_ERR_SUCCESS: if the control is returned successfully.               */
+/* - SM_ERR_NOT_FOUND: if ctrlId does not point to a valid control.         */
+/* - SM_ERR_DENIED: if the calling agent is not allowed to get this         */
+/*   control.                                                               */
+/* - SM_ERR_PROTOCOL_ERROR: if the incoming payload is too small.           */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscControlGet(const scmi_caller_t *caller,
+    const msg_rmisc4_t *in, msg_tmisc4_t *out, uint32_t *len)
+{
+    int32_t status = SM_ERR_SUCCESS;
+#if (SM_NUM_CTRL - DEV_SM_NUM_CTRL) > 0
+    uint32_t uCtrlId = in->ctrlId & ~MISC_CTRL_FLAG_BRD;
+#else
+    uint32_t uCtrlId = in->ctrlId;
+#endif
+
+    /* Check request length */
+    if (caller->lenCopy < sizeof(*in))
+    {
+        status = SM_ERR_PROTOCOL_ERROR;
+    }
+
+    /* Check and generate unified ctrlId */
+    if (status == SM_ERR_SUCCESS)
+    {
+#if (SM_NUM_CTRL - DEV_SM_NUM_CTRL) > 0
+        if ((in->ctrlId & MISC_CTRL_FLAG_BRD) == 0U)
+#endif
+        {
+            /* Check control */
+            if (uCtrlId >= DEV_SM_NUM_CTRL)
+            {
+                status = SM_ERR_NOT_FOUND;
+            }
+        }
+#if (SM_NUM_CTRL - DEV_SM_NUM_CTRL) > 0
+        else
+        {
+            /* Check control */
+            if (uCtrlId >= (SM_NUM_CTRL - DEV_SM_NUM_CTRL))
+            {
+                status = SM_ERR_NOT_FOUND;
+            }
+
+            /* Adjust to end of device controls */
+            uCtrlId += DEV_SM_NUM_CTRL;
+        }
+#endif
+    }
+
+    /* Check permissions */
+    if ((status == SM_ERR_SUCCESS)
+        && (g_scmiAgentConfig[caller->agentId].ctrlPerms[uCtrlId]
+        < SM_SCMI_PERM_GET))
+    {
+        status = SM_ERR_DENIED;
+    }
+
+    /* Get control */
+    if (status == SM_ERR_SUCCESS)
+    {
+        status = LMM_MiscControlGet(caller->lmId, uCtrlId, &(out->numVal),
+            out->val);
+    }
+
+    /* Update length */
+    if (status == SM_ERR_SUCCESS)
+    {
+        /*
+         * False Positive: Cannot exceed size of buffer
+         * in MU 1K SRAM so cannot exceed a 32-bit int
+         */
+        /* coverity[cert_int30_c_violation:FALSE] */
+        *len = (3U + out->numVal) * sizeof(uint32_t);
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Initiate an action on a control value                                    */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - in->ctrlId: Identifier for the control                                 */
+/* - in->action: Action for the control                                     */
+/* - in->numArg: Size of the argument data                                  */
+/* - in->arg: Argument data array                                           */
+/* - out->numRtn: Size of the return data in words                          */
+/* - out->rtn: Return data array                                            */
+/* - len: Pointer to length (can modify)                                    */
+/*                                                                          */
+/* Process the MISC_CONTROL_ACTION message. Platform handler for            */
+/* SCMI_MiscControlAction(). Requires access greater than or equal to       */
+/* EXCLUSIVE.                                                               */
+/*                                                                          */
+/* Return errors:                                                           */
+/* - SM_ERR_SUCCESS: if the action is successfully.                         */
+/* - SM_ERR_NOT_FOUND: if ctrlId does not point to a valid control.         */
+/* - SM_ERR_DENIED: if the calling agent is not allowed to initiate the     */
+/*   action on this control.                                                */
+/* - SM_ERR_PROTOCOL_ERROR: if the incoming payload is too small.           */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscControlAction(const scmi_caller_t *caller,
+    const msg_rmisc5_t *in, msg_tmisc5_t *out, uint32_t *len)
+{
+    int32_t status = SM_ERR_SUCCESS;
+#if (SM_NUM_CTRL - DEV_SM_NUM_CTRL) > 0
+    uint32_t uCtrlId = in->ctrlId & ~MISC_CTRL_FLAG_BRD;
+#else
+    uint32_t uCtrlId = in->ctrlId;
+#endif
+
+    /* Check numArg value */
+    if (in->numArg <= MISC_MAX_ARG_T)
+    {
+        /* Check request length */
+        if (caller->lenCopy < ((4U + in->numArg) * sizeof(uint32_t)))
+        {
+            status = SM_ERR_PROTOCOL_ERROR;
+        }
+    }
+    else
+    {
+        /* Set the status */
+        status = SM_ERR_INVALID_PARAMETERS;
+    }
+
+    /* Check and generate unified ctrlId */
+    if (status == SM_ERR_SUCCESS)
+    {
+#if (SM_NUM_CTRL - DEV_SM_NUM_CTRL) > 0
+        if ((in->ctrlId & MISC_CTRL_FLAG_BRD) == 0U)
+#endif
+        {
+            /* Check control */
+            if (uCtrlId >= DEV_SM_NUM_CTRL)
+            {
+                status = SM_ERR_NOT_FOUND;
+            }
+        }
+#if (SM_NUM_CTRL - DEV_SM_NUM_CTRL) > 0
+        else
+        {
+            /* Check control */
+            if (uCtrlId >= (SM_NUM_CTRL - DEV_SM_NUM_CTRL))
+            {
+                status = SM_ERR_NOT_FOUND;
+            }
+
+            /* Adjust to end of device controls */
+            uCtrlId += DEV_SM_NUM_CTRL;
+        }
+#endif
+    }
+
+    /* Check permissions */
+    if ((status == SM_ERR_SUCCESS)
+        && (g_scmiAgentConfig[caller->agentId].ctrlPerms[uCtrlId]
+        < SM_SCMI_PERM_EXCLUSIVE))
+    {
+        status = SM_ERR_DENIED;
+    }
+
+    /* Get control */
+    if (status == SM_ERR_SUCCESS)
+    {
+        status = LMM_MiscControlAction(caller->lmId, uCtrlId, in->action,
+            in->numArg, in->arg, &(out->numRtn), out->rtn);
+    }
+
+    /* Update length */
+    if (status == SM_ERR_SUCCESS)
+    {
+        /* Check numRtn is within the range */
+        if (out->numRtn <= MISC_MAX_RTN)
+        {
+            *len = (3U + out->numRtn) * sizeof(uint32_t);
+        }
+        else
+        {
+            /* Set the status */
+            status = SM_ERR_NOT_FOUND;
+        }
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Get implementation build info                                            */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - out->buildNum: Build number                                            */
+/* - out->buildCommit: Most significant 32 bits of the git commit hash      */
+/* - out->buildDate: Date of build. Null terminated ASCII string of up to   */
+/*   16 bytes in length                                                     */
+/* - out->buildTime: Time of build. Null terminated ASCII string of up to   */
+/*   16 bytes in length                                                     */
+/*                                                                          */
+/* Process the MISC_DISCOVER_BUILD_INFO message. Platform handler for       */
+/* SCMI_MiscDiscoverBuildInfo().                                            */
+/*                                                                          */
+/* Return errors:                                                           */
+/* - SM_ERR_SUCCESS: in case the build info is returned.                    */
+/* - SM_ERR_NOT_SUPPORTED: if the data is not available.                    */
+/* - SM_ERR_PROTOCOL_ERROR: if the incoming payload is too small.           */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscDiscoverBuildInfo(const scmi_caller_t *caller,
+    const scmi_msg_header_t *in, msg_tmisc6_t *out)
+{
+    int32_t status = SM_ERR_SUCCESS;
+
+    /* Check request length */
+    if (caller->lenCopy < sizeof(*in))
+    {
+        status = SM_ERR_PROTOCOL_ERROR;
+    }
+
+    /* Return data */
+    if (status == SM_ERR_SUCCESS)
+    {
+        /* Copy out build number and commit */
+        out->buildNum = SM_BUILD;
+        out->buildCommit = SM_COMMIT;
+
+        /* Copy out build date */
+        /* coverity[misra_c_2012_rule_7_4_violation] */
+        RPC_SCMI_StrCpy(out->buildDate, ((uint8_t const *) SM_DATE),
+            MISC_MAX_BUILDDATE);
+
+        /* Copy out build time */
+        /* coverity[misra_c_2012_rule_7_4_violation] */
+        RPC_SCMI_StrCpy(out->buildTime, ((uint8_t const *) SM_TIME),
+            MISC_MAX_BUILDTIME);
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Get ROM passover data                                                    */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - out->numPassover: Size of the passover data in words                   */
+/* - out->passover: Passover data array                                     */
+/* - len: Pointer to length (can modify)                                    */
+/*                                                                          */
+/* Process the MISC_ROM_PASSOVER_GET message. Platform handler for          */
+/* SCMI_MiscRomPassoverGet().                                               */
+/*                                                                          */
+/* Return errors:                                                           */
+/* - SM_ERR_SUCCESS: in case the ROM passover data is returned.             */
+/* - SM_ERR_NOT_SUPPORTED: if the data is not available.                    */
+/* - SM_ERR_PROTOCOL_ERROR: if the incoming payload is too small.           */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscRomPassoverGet(const scmi_caller_t *caller,
+    const scmi_msg_header_t *in, msg_tmisc7_t *out, uint32_t *len)
+{
+    int32_t status = SM_ERR_SUCCESS;
+    uint32_t numPassover = sizeof(rom_passover_t) / sizeof(uint32_t);
+    const rom_passover_t *passover;
+
+    /* Check passover size */
+    COMPILE_ASSERT((sizeof(rom_passover_t) / sizeof(uint32_t))
+        <= MISC_MAX_PASSOVER);
+
+    /* Check request length */
+    if (caller->lenCopy < sizeof(*in))
+    {
+        status = SM_ERR_PROTOCOL_ERROR;
+    }
+
+    /* Get info */
+    if (status == SM_ERR_SUCCESS)
+    {
+        status = LMM_MiscRomPassoverGet(caller->lmId, &passover);
+    }
+
+    /* Return data */
+    if (status == SM_ERR_SUCCESS)
+    {
+        /* Update num passover */
+        out->numPassover = numPassover;
+
+        /* Copy data */
+        /*
+         * False Positive: Copy size is checked with a compile assert
+         * above.
+         */
+        /* coverity[buffer_size:FALSE] */
+        (void) memcpy((void*) out->passover, (const void*) passover,
+            out->numPassover * sizeof(uint32_t));
+
+        /* Update length */
+        *len = (3U + out->numPassover) * sizeof(uint32_t);
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Configure control notifications                                          */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - in->ctrlId: Identifier for the control                                 */
+/* - in->flags: Notification flags, varies by control                       */
+/*                                                                          */
+/* Process the MISC_CONTROL_NOTIFY message. Platform handler for            */
+/* SCMI_MiscControlNotify(). Requires access greater than or equal to       */
+/* NOTIFY.                                                                  */
+/*                                                                          */
+/* Return errors:                                                           */
+/* - SM_ERR_SUCCESS: if the notification successfully updated.              */
+/* - SM_ERR_NOT_FOUND: if the LM identified by ctrlId does not exist.       */
+/* - SM_ERR_INVALID_PARAMETERS, if the input attributes flag specifies      */
+/*   unsupported or invalid configurations.                                 */
+/* - SM_ERR_DENIED: if the calling agent is not permitted to request the    */
+/*   notification.                                                          */
+/* - SM_ERR_PROTOCOL_ERROR: if the incoming payload is too small.           */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscControlNotify(const scmi_caller_t *caller,
+    const msg_rmisc8_t *in, const scmi_msg_status_t *out)
+{
+    int32_t status = SM_ERR_SUCCESS;
+#if (SM_NUM_CTRL - DEV_SM_NUM_CTRL) > 0
+    uint32_t uCtrlId = in->ctrlId & ~MISC_CTRL_FLAG_BRD;
+#else
+    uint32_t uCtrlId = in->ctrlId;
+#endif
+
+    /* Check request length */
+    if (caller->lenCopy < sizeof(*in))
+    {
+        status = SM_ERR_PROTOCOL_ERROR;
+    }
+
+    /* Check and generate unified ctrlId */
+    if (status == SM_ERR_SUCCESS)
+    {
+#if (SM_NUM_CTRL - DEV_SM_NUM_CTRL) > 0
+        if ((in->ctrlId & MISC_CTRL_FLAG_BRD) == 0U)
+#endif
+        {
+            /* Check control */
+            if (uCtrlId >= DEV_SM_NUM_CTRL)
+            {
+                status = SM_ERR_NOT_FOUND;
+            }
+        }
+#if (SM_NUM_CTRL - DEV_SM_NUM_CTRL) > 0
+        else
+        {
+            /* Check control */
+            if (uCtrlId >= (SM_NUM_CTRL - DEV_SM_NUM_CTRL))
+            {
+                status = SM_ERR_NOT_FOUND;
+            }
+
+            /* Adjust to end of device controls */
+            uCtrlId += DEV_SM_NUM_CTRL;
+        }
+#endif
+    }
+
+    /* Check permissions */
+    if ((status == SM_ERR_SUCCESS)
+        && (g_scmiAgentConfig[caller->agentId].ctrlPerms[uCtrlId]
+        < SM_SCMI_PERM_NOTIFY))
+    {
+        status = SM_ERR_DENIED;
+    }
+
+    /* Update notification flags */
+    if (status == SM_ERR_SUCCESS)
+    {
+        status = MiscControlUpdate(caller->lmId, caller->agentId,
+            uCtrlId, in->flags);
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Get (reset) reason attributes                                            */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - in->reasonId: Identifier for the reason                                */
+/* - out->attributes: Reason attributes. This parameter has the following   */
+/*   format:                                                                */
+/*   Bits[31:0] Reserved, must be zero                                      */
+/* - out->name: Null-terminated ASCII string of up to 16 bytes in length    */
+/*   describing the reason                                                  */
+/*                                                                          */
+/* Process the MISC_REASON_ATTRIBUTES message. Platform handler for         */
+/* SCMI_MiscReasonAttributes().                                             */
+/*                                                                          */
+/* Return errors:                                                           */
+/* - SM_ERR_SUCCESS: if valid reason attributes are returned.               */
+/* - SM_ERR_NOT_FOUND: if reasonId pertains to a non-existent reason.       */
+/* - SM_ERR_PROTOCOL_ERROR: if the incoming payload is too small.           */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscReasonAttributes(const scmi_caller_t *caller,
+    const msg_rmisc9_t *in, msg_tmisc9_t *out)
+{
+    int32_t status = SM_ERR_SUCCESS;
+    /* coverity[misra_c_2012_rule_7_4_violation:FALSE] */
+    const uint8_t *nameAddr = (const uint8_t*) "";
+
+    /* Check request length */
+    if (caller->lenCopy < sizeof(*in))
+    {
+        status = SM_ERR_PROTOCOL_ERROR;
+    }
+
+    /* Check reason */
+    if ((status == SM_ERR_SUCCESS) && (in->reasonId >= SM_NUM_REASON))
+    {
+        status = SM_ERR_NOT_FOUND;
+    }
+
+    /* Get the reason name */
+    if (status == SM_ERR_SUCCESS)
+    {
+        status = LMM_SystemReasonNameGet(caller->lmId, in->reasonId,
+            /* Pointer coversion required from comm buffer */
+            /* coverity[misra_c_2012_rule_11_3_violation] */
+            (string*) &nameAddr, NULL);
+    }
+
+    /* Return results */
+    if (status == SM_ERR_SUCCESS)
+    {
+        /* Always zero */
+        out->attributes = 0U;
+
+        /* Copy out name */
+        RPC_SCMI_StrCpy(out->name, nameAddr, MISC_MAX_NAME);
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Read the reason the LM/system last booted/shutdown/reset                 */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - in->flags: Reason flags. This parameter has the following format:      */
+/*   Bits[31:1] Reserved, must be zero.                                     */
+/*   Bit[0] System:                                                         */
+/*   Set to 1 to return the system reason.                                  */
+/*   Set to 0 to return the LM reason                                       */
+/* - out->bootFlags: Boot reason flags. This parameter has the following    */
+/*   format:                                                                */
+/*   Bits[31] Valid.                                                        */
+/*   Set to 1 if the entire reason is valid.                                */
+/*   Set to 0 if the entire reason is not valid.                            */
+/*   Bits[30:29] Reserved, must be zero.                                    */
+/*   Bit[28] Valid origin:                                                  */
+/*   Set to 1 if the origin field is valid.                                 */
+/*   Set to 0 if the origin field is not valid.                             */
+/*   Bits[27:24] Origin.                                                    */
+/*   Bit[23] Valid err ID:                                                  */
+/*   Set to 1 if the error ID field is valid.                               */
+/*   Set to 0 if the error ID field is not valid.                           */
+/*   Bits[22:8] Error ID.                                                   */
+/*   Bit[7:0] Reason                                                        */
+/* - out->shutdownFlags: Shutdown reason flags. This parameter has the      */
+/*   following format:                                                      */
+/*   Bits[31] Valid.                                                        */
+/*   Set to 1 if the entire reason is valid.                                */
+/*   Set to 0 if the entire reason is not valid.                            */
+/*   Bits[30:29] Number of valid extended info words.                       */
+/*   Bit[28] Valid origin:                                                  */
+/*   Set to 1 if the origin field is valid.                                 */
+/*   Set to 0 if the origin field is not valid.                             */
+/*   Bits[27:24] Origin.                                                    */
+/*   Bit[23] Valid err ID:                                                  */
+/*   Set to 1 if the error ID field is valid.                               */
+/*   Set to 0 if the error ID field is not valid.                           */
+/*   Bits[22:8] Error ID.                                                   */
+/*   Bit[7:0] Reason                                                        */
+/* - out->extInfo: Array of extended info words                             */
+/* - len: Pointer to length (can modify)                                    */
+/*                                                                          */
+/* Process the MISC_RESET_REASON message. Platform handler for              */
+/* SCMI_MiscResetReason().                                                  */
+/*                                                                          */
+/*  Access macros:                                                          */
+/* - MISC_REASON_FLAG_SYSTEM() - System                                     */
+/* - MISC_BOOT_FLAG_VLD() - Valid                                           */
+/* - MISC_BOOT_FLAG_ORG_VLD() - Valid origin                                */
+/* - MISC_BOOT_FLAG_ORIGIN() - LM source of action                          */
+/* - MISC_BOOT_FLAG_ERR_VLD() - Valid error ID                              */
+/* - MISC_BOOT_FLAG_ERR_ID() - Error ID                                     */
+/* - MISC_BOOT_FLAG_REASON() - Reason                                       */
+/* - MISC_SHUTDOWN_FLAG_VLD() - Valid                                       */
+/* - MISC_SHUTDOWN_FLAG_EXT_LEN() - Number of valid extended info words     */
+/* - MISC_SHUTDOWN_FLAG_ORG_VLD() - Valid origin                            */
+/* - MISC_SHUTDOWN_FLAG_ORIGIN() - LM source of action                      */
+/* - MISC_SHUTDOWN_FLAG_ERR_VLD() - Valid error ID                          */
+/* - MISC_SHUTDOWN_FLAG_ERR_ID() - Error ID                                 */
+/* - MISC_SHUTDOWN_FLAG_REASON() - Reason                                   */
+/*                                                                          */
+/* Return errors:                                                           */
+/* - SM_ERR_PROTOCOL_ERROR: if the incoming payload is too small.           */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscResetReason(const scmi_caller_t *caller,
+    const msg_rmisc10_t *in, msg_tmisc10_t *out, uint32_t *len)
+{
+    int32_t status = SM_ERR_SUCCESS;
+    lmm_rst_rec_t bootRec = { 0 };
+    lmm_rst_rec_t shutdownRec = { 0 };
+    bool sys = MISC_REASON_FLAG_SYSTEM(in->flags) != 0U;
+
+    /* Check request length */
+    if (caller->lenCopy < sizeof(*in))
+    {
+        status = SM_ERR_PROTOCOL_ERROR;
+    }
+
+    /* Get reset reason */
+    if (status == SM_ERR_SUCCESS)
+    {
+        if (sys)
+        {
+            /* Get reset info */
+            LM_SystemReason(caller->lmId, &bootRec,
+                &shutdownRec);
+        }
+        else
+        {
+            /* Get LM reset info */
+            status = LM_SystemLmReason(caller->lmId, caller->lmId,
+                &bootRec, &shutdownRec);
+        }
+    }
+
+    /* Fill in return data */
+    if (status == SM_ERR_SUCCESS)
+    {
+        /* Update record size */
+        uint32_t extLen = MIN(shutdownRec.extLen, MISC_MAX_EXTINFO);
+        extLen = MIN(extLen, DEV_SM_NUM_EXT_INFO);
+
+        /* Fill in boot info */
+        out->bootFlags
+            = MISC_BOOT_FLAG_VLD(bootRec.valid ? 1UL : 0UL)
+            | MISC_BOOT_FLAG_ORG_VLD(bootRec.validOrigin ? 1UL : 0UL)
+            | MISC_BOOT_FLAG_ORIGIN(bootRec.origin)
+            | MISC_BOOT_FLAG_ERR_VLD(bootRec.validErr ? 1UL : 0UL)
+            | MISC_BOOT_FLAG_ERR_ID(bootRec.errId)
+            | MISC_BOOT_FLAG_REASON(bootRec.reason);
+
+        /* Fill in shutdown info */
+        out->shutdownFlags
+            = MISC_SHUTDOWN_FLAG_VLD(shutdownRec.valid ? 1UL : 0UL)
+            | MISC_SHUTDOWN_FLAG_EXT_LEN(extLen)
+            | MISC_SHUTDOWN_FLAG_ORG_VLD(shutdownRec.validOrigin ? 1UL : 0UL)
+            | MISC_SHUTDOWN_FLAG_ORIGIN(shutdownRec.origin)
+            | MISC_SHUTDOWN_FLAG_ERR_VLD(shutdownRec.validErr ? 1UL : 0UL)
+            | MISC_SHUTDOWN_FLAG_ERR_ID(shutdownRec.errId)
+            | MISC_SHUTDOWN_FLAG_REASON(shutdownRec.reason);
+
+        /* Copy extended words */
+        for (uint32_t idx = 0U; idx < extLen; idx++)
+        {
+            out->extInfo[idx] = shutdownRec.extInfo[idx];
+        }
+
+        /* Update length */
+        *len = (4U + extLen) * sizeof(uint32_t);
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Get silicon info                                                         */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - out->deviceId: Silicon specific device ID                              */
+/* - out->siRev: Silicon specific revision                                  */
+/* - out->partNum: Silicon specific part number                             */
+/* - out->siName: Silicon name/revision. Null terminated ASCII string of    */
+/*   up to 16 bytes in length                                               */
+/*                                                                          */
+/* Process the MISC_SI_INFO message. Platform handler for                   */
+/* SCMI_MiscSiInfo().                                                       */
+/*                                                                          */
+/* Return errors:                                                           */
+/* - SM_ERR_PROTOCOL_ERROR: if the incoming payload is too small.           */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscSiInfo(const scmi_caller_t *caller,
+    const scmi_msg_header_t *in, msg_tmisc11_t *out)
+{
+    int32_t status = SM_ERR_SUCCESS;
+    /* coverity[misra_c_2012_rule_7_4_violation:FALSE] */
+    const uint8_t *nameAddr = (const uint8_t*) "";
+    uint32_t deviceId = 0U;
+    uint32_t siRev = 0U;
+    uint32_t partNum = 0U;
+
+    /* Check request length */
+    if (caller->lenCopy < sizeof(*in))
+    {
+        status = SM_ERR_PROTOCOL_ERROR;
+    }
+
+    /* Get the silicon info */
+    if (status == SM_ERR_SUCCESS)
+    {
+        status = SM_SIINFOGET(&deviceId, &siRev, &partNum,
+            /* Pointer coversion required from comm buffer */
+            /* coverity[misra_c_2012_rule_11_3_violation] */
+            (string*) &nameAddr, NULL);
+    }
+
+    /* Return results */
+    if (status == SM_ERR_SUCCESS)
+    {
+        /* Return data */
+        out->deviceId = deviceId;
+        out->siRev = siRev;
+        out->partNum = partNum;
+
+        /* Copy out name */
+        RPC_SCMI_StrCpy(out->siName, nameAddr, MISC_MAX_SINAME);
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Get build config info                                                    */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - out->mSel: Mode selector value                                         */
+/* - out->cfgName: Config (cfg) file basename. Null terminated ASCII        */
+/*   string of up to 16 bytes in length                                     */
+/*                                                                          */
+/* Process the MISC_CFG_INFO message. Platform handler for                  */
+/* SCMI_MiscCfgInfo().                                                      */
+/*                                                                          */
+/* Return errors:                                                           */
+/* - SM_ERR_SUCCESS: in case the cfg info is returned.                      */
+/* - SM_ERR_NOT_SUPPORTED: if the info is not available.                    */
+/* - SM_ERR_PROTOCOL_ERROR: if the incoming payload is too small.           */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscCfgInfo(const scmi_caller_t *caller,
+    const scmi_msg_header_t *in, msg_tmisc12_t *out)
+{
+    int32_t status = SM_ERR_SUCCESS;
+
+    /* Check request length */
+    if (caller->lenCopy < sizeof(*in))
+    {
+        status = SM_ERR_PROTOCOL_ERROR;
+    }
+
+    /* Return data */
+    if (status == SM_ERR_SUCCESS)
+    {
+        string cfgName;
+
+        /* Get info */
+        cfgName = LMM_CfgInfoGet(&(out->mSel));
+
+        /* Copy out cfg name */
+        /* coverity[misra_c_2012_rule_7_4_violation] */
+        RPC_SCMI_StrCpy(out->cfgName, (const uint8_t*) cfgName,
+            MISC_MAX_CFGNAME);
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Get system log                                                           */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - in->flags: Device specific flags that might impact the data returned   */
+/*   or clearing of the data                                                */
+/* - in->logIndex: Index to the first log word. Will be the first element   */
+/*   in the return array                                                    */
+/* - out->numLogFlags: Descriptor for the log data returned by this call.   */
+/*   Bits[31:20] Number of remaining log words.                             */
+/*   Bits[15:12] Reserved, must be zero.                                    */
+/*   Bits[11:0] Number of log words that are returned by this call          */
+/* - out->syslog: Log data array                                            */
+/* - len: Pointer to length (can modify)                                    */
+/*                                                                          */
+/* Process the MISC_SYSLOG message. Platform handler for                    */
+/* SCMI_MiscSyslog().                                                       */
+/*                                                                          */
+/*  Access macros:                                                          */
+/* - MISC_NUM_LOG_FLAGS_REMAING_LOGS() - Number of remaining log words      */
+/* - MISC_NUM_LOG_FLAGS_NUM_LOGS() - Number of log words that are returned  */
+/*   by this call                                                           */
+/*                                                                          */
+/* Return errors:                                                           */
+/* - SM_ERR_SUCCESS: if the syslog returned successfully.                   */
+/* - SM_ERR_NOT_SUPPORTED: if the syslog is not available.                  */
+/* - SM_ERR_PROTOCOL_ERROR: if the incoming payload is too small.           */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscSyslog(const scmi_caller_t *caller,
+    const msg_rmisc13_t *in, msg_tmisc13_t *out, uint32_t *len)
+{
+    int32_t status = SM_ERR_SUCCESS;
+    uint32_t words = 0U;
+    const uint32_t *syslog;
+
+    /* Check request length */
+    if (caller->lenCopy < sizeof(*in))
+    {
+        status = SM_ERR_PROTOCOL_ERROR;
+    }
+
+    /* Get data */
+    if (status == SM_ERR_SUCCESS)
+    {
+        /* Call device */
+        /* Pointer coversion required from comm buffer */
+        /* coverity[misra_c_2012_rule_11_3_violation] */
+        status = SM_SYSLOGGET(in->flags, (const dev_sm_syslog_t**) &syslog,
+            &words);
+
+        /* Convert to words */
+        words /= 4U;
+    }
+
+    /* Copy out data */
+    if (status == SM_ERR_SUCCESS)
+    {
+        uint32_t index;
+
+        out->numLogFlags = 0U;
+        for (index = 0U; index < MISC_MAX_SYSLOG; index++)
+        {
+            /* Break out if done */
+            if ((index + in->logIndex) >= words)
+            {
+                break;
+            }
+
+            /* Copy out data */
+            out->syslog[index] = syslog[index + in->logIndex];
+
+            /* Increment count */
+            /*
+             * False Positive: The value of numLogFlags is incremented within
+             * a loop, which can run up to a maximum of MISC_MAX_SYSLOG.
+             */
+            /* coverity[cert_int30_c_violation:FALSE] */
+            (out->numLogFlags)++;
+        }
+
+        /* Update length */
+        /*
+         * Intentional : To cause an overflow in the expression below,
+         * the value of MISC_MAX_SYSLOG would need to be excessively large
+         * number (larger than all the TCM available)
+         */
+        /* coverity[cert_int30_c_violation] */
+        *len = (3U * sizeof(uint32_t)) + (out->numLogFlags * sizeof(uint32_t));
+
+        /* Append remaining logs */
+        out->numLogFlags |= MISC_NUM_LOG_FLAGS_REMAING_LOGS(
+            words - (index + in->logIndex));
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Get board info                                                           */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - out->attributes: Board specific attributes                             */
+/* - out->brdName: Board name. Null terminated ASCII string of up to 16     */
+/*   bytes in length                                                        */
+/*                                                                          */
+/* Process the MISC_BOARD_INFO message. Platform handler for                */
+/* SCMI_MiscBoardInfo().                                                    */
+/*                                                                          */
+/* Return errors:                                                           */
+/* - SM_ERR_SUCCESS: in case the board info is returned.                    */
+/* - SM_ERR_NOT_SUPPORTED: if the info is not available.                    */
+/* - SM_ERR_PROTOCOL_ERROR: if the incoming payload is too small.           */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscBoardInfo(const scmi_caller_t *caller,
+    const scmi_msg_header_t *in, msg_tmisc14_t *out)
+{
+    int32_t status = SM_ERR_SUCCESS;
+
+    /* Check request length */
+    if (caller->lenCopy < sizeof(*in))
+    {
+        status = SM_ERR_PROTOCOL_ERROR;
+    }
+
+    /* Return data */
+    if (status == SM_ERR_SUCCESS)
+    {
+        /* Set attributes */
+        out->attributes = BRD_SM_ATTR;
+
+        /* Copy out board name */
+        RPC_SCMI_StrCpy(out->brdName,
+            /* coverity[misra_c_2012_rule_7_4_violation:FALSE] */
+            (const uint8_t *) BRD_SM_NAME, MISC_MAX_BRDNAME);
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Negotiate the protocol version                                           */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - in->version: The negotiated protocol version the agent intends to use  */
+/*                                                                          */
+/* Process the NEGOTIATE_PROTOCOL_VERSION message. Platform handler for     */
+/* SCMI_MiscNegotiateProtocolVersion().                                     */
+/*                                                                          */
+/* Return errors:                                                           */
+/* - SM_ERR_SUCCESS: if the negotiated protocol version is supported by     */
+/*   the platform. All commands, responses, and notifications post          */
+/*   successful return of this command must comply with the negotiated      */
+/*   version.                                                               */
+/* - SM_ERR_NOT_SUPPORTED: if the protocol version is not supported.        */
+/* - SM_ERR_PROTOCOL_ERROR: if the incoming payload is too small.           */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscNegotiateProtocolVersion(const scmi_caller_t *caller,
+    const msg_rmisc16_t *in, const scmi_msg_status_t *out)
+{
+    int32_t status = SM_ERR_SUCCESS;
+
+    /* Check request length */
+    if (caller->lenCopy < sizeof(*in))
+    {
+        status = SM_ERR_PROTOCOL_ERROR;
+    }
+
+    /* Check major version */
+    if ((status == SM_ERR_SUCCESS) && (SCMI_VER_MAJOR(in->version)
+        == SCMI_VER_MAJOR(PROTOCOL_VERSION)))
+    {
+        /* Check minor version */
+        if (SCMI_VER_MINOR(in->version) > SCMI_VER_MINOR(PROTOCOL_VERSION))
+        {
+            status = SM_ERR_NOT_SUPPORTED;
+        }
+    }
+    else
+    {
+        status = SM_ERR_NOT_SUPPORTED;
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Set an extended control value                                            */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - in->ctrlId: Identifier for the control                                 */
+/* - in->addr: Address of the control set                                   */
+/* - in->len: Requested size of the set                                     */
+/* - in->numVal: Size of the value data                                     */
+/* - in->extVal: Value data array                                           */
+/*                                                                          */
+/* Process the MISC_CONTROL_EXT_SET message. Platform handler for           */
+/* SCMI_MiscControlExtSet(). Requires access greater than or equal to       */
+/* EXCLUSIVE.                                                               */
+/*                                                                          */
+/* Return errors:                                                           */
+/* - SM_ERR_SUCCESS: if the control is set successfully.                    */
+/* - SM_ERR_NOT_FOUND: if ctrlId does not point to a valid control.         */
+/* - SM_ERR_DENIED: if the calling agent is not allowed to set this         */
+/*   control.                                                               */
+/* - SM_ERR_PROTOCOL_ERROR: if the incoming payload is too small.           */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscControlExtSet(const scmi_caller_t *caller,
+    const msg_rmisc32_t *in, const scmi_msg_status_t *out)
+{
+    int32_t status = SM_ERR_SUCCESS;
+#if (SM_NUM_CTRL - DEV_SM_NUM_CTRL) > 0
+    uint32_t uCtrlId = in->ctrlId & ~MISC_CTRL_FLAG_BRD;
+#else
+    uint32_t uCtrlId = in->ctrlId;
+#endif
+
+    /* Check the numVal is within the range */
+    if (in->numVal <= MISC_MAX_EXTVAL)
+    {
+        /* Check request length */
+        if (caller->lenCopy < ((5U + in->numVal) * sizeof(uint32_t)))
+        {
+            status = SM_ERR_PROTOCOL_ERROR;
+        }
+    }
+    else
+    {
+        /* Set the status */
+        status = SM_ERR_INVALID_PARAMETERS;
+    }
+
+    /* Check parameters */
+    if (in->len != in->numVal)
+    {
+        status = SM_ERR_INVALID_PARAMETERS;
+    }
+
+    /* Check and generate unified ctrlId */
+    if (status == SM_ERR_SUCCESS)
+    {
+#if (SM_NUM_CTRL - DEV_SM_NUM_CTRL) > 0
+        if ((in->ctrlId & MISC_CTRL_FLAG_BRD) == 0U)
+#endif
+        {
+            /* Check control */
+            if (uCtrlId >= DEV_SM_NUM_CTRL)
+            {
+                status = SM_ERR_NOT_FOUND;
+            }
+        }
+#if (SM_NUM_CTRL - DEV_SM_NUM_CTRL) > 0
+        else
+        {
+            /* Check control */
+            if (uCtrlId >= (SM_NUM_CTRL - DEV_SM_NUM_CTRL))
+            {
+                status = SM_ERR_NOT_FOUND;
+            }
+
+            /* Adjust to end of device controls */
+            uCtrlId += DEV_SM_NUM_CTRL;
+        }
+#endif
+    }
+
+    /* Check permissions */
+    if ((status == SM_ERR_SUCCESS)
+        && (g_scmiAgentConfig[caller->agentId].ctrlPerms[uCtrlId]
+        < SM_SCMI_PERM_EXCLUSIVE))
+    {
+        status = SM_ERR_DENIED;
+    }
+
+    /* Set control */
+    if (status == SM_ERR_SUCCESS)
+    {
+        status = LMM_MiscControlExtSet(caller->lmId, uCtrlId, in->addr,
+            in->numVal, in->extVal);
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Get an extended control value                                            */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - in->ctrlId: Identifier for the control                                 */
+/* - in->addr: Address of the control get                                   */
+/* - in->len: Requested size of the get                                     */
+/* - out->numVal: Size of the return data in words                          */
+/* - out->extVal: Return data array                                         */
+/* - len: Pointer to length (can modify)                                    */
+/*                                                                          */
+/* Process the MISC_CONTROL_EXT_GET message. Platform handler for           */
+/* SCMI_MiscControlExtGet(). Requires access greater than or equal to GET.  */
+/*                                                                          */
+/* Return errors:                                                           */
+/* - SM_ERR_SUCCESS: if the control is returned successfully.               */
+/* - SM_ERR_NOT_FOUND: if ctrlId does not point to a valid control.         */
+/* - SM_ERR_DENIED: if the calling agent is not allowed to get this         */
+/*   control.                                                               */
+/* - SM_ERR_PROTOCOL_ERROR: if the incoming payload is too small.           */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscControlExtGet(const scmi_caller_t *caller,
+    const msg_rmisc33_t *in, msg_tmisc33_t *out, uint32_t *len)
+{
+    int32_t status = SM_ERR_SUCCESS;
+#if (SM_NUM_CTRL - DEV_SM_NUM_CTRL) > 0
+    uint32_t uCtrlId = in->ctrlId & ~MISC_CTRL_FLAG_BRD;
+#else
+    uint32_t uCtrlId = in->ctrlId;
+#endif
+
+    /* Check request length */
+    if (caller->lenCopy < sizeof(*in))
+    {
+        status = SM_ERR_PROTOCOL_ERROR;
+    }
+
+    /* Check and generate unified ctrlId */
+    if (status == SM_ERR_SUCCESS)
+    {
+#if (SM_NUM_CTRL - DEV_SM_NUM_CTRL) > 0
+        if ((in->ctrlId & MISC_CTRL_FLAG_BRD) == 0U)
+#endif
+        {
+            /* Check control */
+            if (uCtrlId >= DEV_SM_NUM_CTRL)
+            {
+                status = SM_ERR_NOT_FOUND;
+            }
+        }
+#if (SM_NUM_CTRL - DEV_SM_NUM_CTRL) > 0
+        else
+        {
+            /* Check control */
+            if (uCtrlId >= (SM_NUM_CTRL - DEV_SM_NUM_CTRL))
+            {
+                status = SM_ERR_NOT_FOUND;
+            }
+
+            /* Adjust to end of device controls */
+            uCtrlId += DEV_SM_NUM_CTRL;
+        }
+#endif
+    }
+
+    /* Check permissions */
+    if ((status == SM_ERR_SUCCESS)
+        && (g_scmiAgentConfig[caller->agentId].ctrlPerms[uCtrlId]
+        < SM_SCMI_PERM_GET))
+    {
+        status = SM_ERR_DENIED;
+    }
+
+    /* Get control */
+    if (status == SM_ERR_SUCCESS)
+    {
+        out->numVal = in->len;
+
+        status = LMM_MiscControlExtGet(caller->lmId, uCtrlId, in->addr,
+            in->len, out->extVal);
+    }
+
+    /* Update length */
+    if (status == SM_ERR_SUCCESS)
+    {
+        /* Check the numVal with in range */
+        if (out->numVal <= MISC_MAX_EXTVAL)
+        {
+            *len = (3U + out->numVal) * sizeof(uint32_t);
+        }
+        else
+        {
+            /* Set the status */
+            status = SM_ERR_NOT_FOUND;
+        }
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Get DDR memory region info                                               */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - caller: Caller info                                                    */
+/* - in->ddrRgdId: Identifier for the DDR memory region                     */
+/* - out->attributes: Region attributes:                                    */
+/*   Bit[31] ECC enable.                                                    */
+/*   Set to 1 if ECC enabled.                                               */
+/*   Set to 0 if ECC disabled or not configured.                            */
+/*   Bits[30:18] Reserved, must be zero.                                    */
+/*   Bits[17:16] Number of DDR memory regions.                              */
+/*   Bits[15:11] Reserved, must be zero.                                    */
+/*   Bits[10:8] Width.                                                      */
+/*   Bus width is 16 << this field.                                         */
+/*   So 0=16, 1=32, 2=64, etc.                                              */
+/*   Bits[7:5] Reserved, must be zero.                                      */
+/*   Bits[4:0] DDR type.                                                    */
+/*   Set to 0 if LPDDR5.                                                    */
+/*   Set to 1 if LPDDR5X.                                                   */
+/*   Set to 2 if LPDDR4.                                                    */
+/*   Set to 3 if LPDDR4X                                                    */
+/* - out->mts: DDR speed in megatransfers per second                        */
+/* - out->startLow: Low address: The lower 32 bits of the physical start    */
+/*   address of the region                                                  */
+/* - out->startHigh: High address: The upper 32 bits of the physical start  */
+/*   address of the region                                                  */
+/* - out->endLow: Low address: The lower 32 bits of the physical end        */
+/*   address of the region. This excludes any DDR used to store ECC data    */
+/* - out->endHigh: High address: The upper 32 bits of the physical end      */
+/*   address of the region. This excludes any DDR used to store ECC data    */
+/*                                                                          */
+/* Process the MISC_DDR_INFO_GET message. Platform handler for              */
+/* SCMI_MiscDdrInfoGet().                                                   */
+/*                                                                          */
+/*  Access macros:                                                          */
+/* - MISC_DDR_ATTR_ECC() - ECC enabled                                      */
+/* - MISC_DDR_ATTR_NUM_RGD() - Number of DDR memory regions                 */
+/* - MISC_DDR_ATTR_WIDTH() - Width                                          */
+/* - MISC_DDR_ATTR_TYPE() - DDR type                                        */
+/*                                                                          */
+/* Return errors:                                                           */
+/* - SM_ERR_SUCCESS: if the info is returned successfully.                  */
+/* - SM_ERR_NOT_FOUND: if ddrRgdId does not point to a region.              */
+/* - SM_ERR_PROTOCOL_ERROR: if the incoming payload is too small.           */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscDdrInfoGet(const scmi_caller_t *caller,
+    const msg_rmisc34_t *in, msg_tmisc34_t *out)
+{
+    int32_t status = SM_ERR_SUCCESS;
+    uint32_t numRdg;
+    uint32_t ddrType;
+    uint32_t ddrWidth;
+    bool eccEnb;
+    uint64_t startAddr;
+    uint64_t endAddr;
+
+    /* Check request length */
+    if (caller->lenCopy < sizeof(*in))
+    {
+        status = SM_ERR_PROTOCOL_ERROR;
+    }
+
+    /* Get info */
+    if (status == SM_ERR_SUCCESS)
+    {
+        status = LMM_MiscDdrInfoGet(caller->lmId, in->ddrRgdId, &numRdg,
+            &ddrType, &ddrWidth, &eccEnb, &out->mts, &startAddr, &endAddr);
+    }
+
+    /* Return data */
+    if (status == SM_ERR_SUCCESS)
+    {
+        /* Return attributes */
+        out->attributes
+            = MISC_DDR_ATTR_NUM_RGD(numRdg)
+            | MISC_DDR_ATTR_WIDTH(ddrWidth >> 5U)
+            | MISC_DDR_ATTR_TYPE(ddrType);
+
+        if (eccEnb)
+        {
+            out->attributes |= MISC_DDR_ATTR_ECC(1UL);
+        }
+
+        /* Return start address */
+        out->startLow = UINT64_L(startAddr);
+        out->startHigh = UINT64_H(startAddr);
+
+        /* Return end address */
+        out->endLow = UINT64_L(endAddr);
+        out->endHigh = UINT64_H(endAddr);
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Send misc control event                                                  */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - msgId: Message ID to dispatch                                          */
+/* - trigger: Trigger data                                                  */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscControlEvent(scmi_msg_id_t msgId,
+    const lmm_rpc_trigger_t *trigger)
+{
+    int32_t status = SM_ERR_SUCCESS;
+
+    /* Loop over all agents */
+    for (uint32_t dstAgent = 0U; dstAgent < SM_SCMI_NUM_AGNT; dstAgent++)
+    {
+        uint32_t uCtrlId = trigger->parm[0];
+        uint32_t flags = trigger->parm[1];
+        uint32_t ctrlId;
+
+        /* Generate ctrlId */
+        if (trigger->parm[0] < DEV_SM_NUM_CTRL)
+        {
+            ctrlId = uCtrlId;
+        }
+        else
+        {
+            /*
+             * False Positive: the value of uCtrlId value would always be
+             * greater than or equal to DEV_SM_NUM_CTRL.
+             */
+            /* coverity[cert_int30_c_violation:FALSE] */
+            ctrlId = (uCtrlId - DEV_SM_NUM_CTRL) | MISC_CTRL_FLAG_BRD;
+        }
+
+        /* Agent belong to instance? */
+        if ((g_scmiAgentConfig[dstAgent].scmiInst == trigger->rpcInst)
+            && ((s_ctrlNotify[uCtrlId][dstAgent] & flags) != 0U))
+        {
+            msg_rmisc64_t out;
+
+            /* Fill in data */
+            out.ctrlId = ctrlId;
+            out.flags = flags;
+
+            /* Queue notification */
+            /* Pointer coversion required from comm buffer */
+            /* coverity[misra_c_2012_rule_11_3_violation] */
+            RPC_SCMI_P2aTxQ(dstAgent, msgId, (uint32_t*) &out,
+                sizeof(out), SCMI_NOTIFY_Q);
+        }
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Reset agent configuration                                                */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - lmId: LM to reset                                                      */
+/* - agentId: Message ID to dispatch                                        */
+/* - permissionsReset: True to reset permissions                            */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscResetAgentConfig(uint32_t lmId, uint32_t agentId,
+    bool permissionsReset)
+{
+    int32_t status = SM_ERR_SUCCESS;
+
+    /* Loop over all controls */
+    for (uint32_t ctrlId = 0U; ctrlId < SM_NUM_CTRL; ctrlId++)
+    {
+        (void) MiscControlUpdate(lmId, agentId, ctrlId, 0U);
+    }
+
+    /* Return status */
+    return status;
+}
+
+/*--------------------------------------------------------------------------*/
+/* Aggregate and update a control notification                              */
+/*                                                                          */
+/* Parameters:                                                              */
+/* - lmId: LM to update                                                     */
+/* - agentId: Message to update                                             */
+/* - ctrlId: control                                                        */
+/* - flags: Notification enable flags                                       */
+/*--------------------------------------------------------------------------*/
+static int32_t MiscControlUpdate(uint32_t lmId, uint32_t agentId,
+    uint32_t ctrlId, uint32_t flags)
+{
+    int32_t status = SM_ERR_SUCCESS;
+
+    /* Check control */
+    if (ctrlId >= SM_NUM_CTRL)
+    {
+        status = SM_ERR_INVALID_PARAMETERS;
+    }
+    else
+    {
+        uint32_t scmiInst = g_scmiAgentConfig[agentId].scmiInst;
+        uint32_t firstAgent = g_scmiConfig[scmiInst].firstAgent;
+        uint32_t numAgents = g_scmiConfig[scmiInst].numAgents;
+
+        uint32_t newFlags = 0U;
+
+        /* Record agent flags for this control */
+        s_ctrlNotify[ctrlId][agentId] = flags;
+
+        /* Calculate new aggregate state for the flags */
+        for (uint32_t a = firstAgent; a < (firstAgent + numAgents); a++)
+        {
+            newFlags |= s_ctrlNotify[ctrlId][a];
+        }
+
+        /* Inform LMM of flags, LMM will check if changed */
+        status = LMM_MiscControlFlagsSet(lmId, ctrlId, newFlags);
+    }
+
+    /* Return status */
+    return status;
+}
+

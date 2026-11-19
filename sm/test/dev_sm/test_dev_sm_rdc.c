@@ -1,0 +1,75 @@
+/*
+** ###################################################################
+**
+** Copyright 2023, 2025-2026 NXP
+**
+** Redistribution and use in source and binary forms, with or without modification,
+** are permitted provided that the following conditions are met:
+**
+** o Redistributions of source code must retain the above copyright notice, this list
+**   of conditions and the following disclaimer.
+**
+** o Redistributions in binary form must reproduce the above copyright notice, this
+**   list of conditions and the following disclaimer in the documentation and/or
+**   other materials provided with the distribution.
+**
+** o Neither the name of the copyright holder nor the names of its
+**   contributors may be used to endorse or promote products derived from this
+**   software without specific prior written permission.
+**
+** THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+** ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+** WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+** DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+** ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+** (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+** LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+** ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+** (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+** SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+**
+**
+** ###################################################################
+*/
+
+/*==========================================================================*/
+/* Unit test for the device SM RDC API.                                     */
+/*==========================================================================*/
+
+/* DEV_00010 */
+
+/* Includes */
+
+#include "test.h"
+#include "dev_sm.h"
+
+/*--------------------------------------------------------------------------*/
+/* Test device SM RDC                                                       */
+/*--------------------------------------------------------------------------*/
+void TEST_DevSmRdc(void)
+{
+    string rdcNameAddr;
+    char rdcLabel;
+    uint32_t rdcBase;
+
+    /* RDC tests */
+    printf("**** Device SM RDC API Tests ***\n\n");
+
+    printf("DEV_SM_RdcAccessSet(%u)\n", 0U);
+    NECHECK(DEV_SM_RdcAccessSet(0U, false, 0U, false),
+        SM_ERR_NOT_SUPPORTED);
+
+    printf("DEV_SM_RdcInfoGet(%u)\n", 0U);
+#ifndef SIMU
+    CHECK(DEV_SM_RdcInfoGet(0U, &rdcNameAddr, &rdcLabel, &rdcBase));
+
+    printf("rdc: %u rdcname: %s label: %c baseaddr: %x\n",
+        0U, rdcNameAddr, rdcLabel, rdcBase);
+#else
+    NECHECK(DEV_SM_RdcInfoGet(0U, &rdcNameAddr, &rdcLabel, &rdcBase),
+        SM_ERR_NOT_FOUND);
+#endif
+
+    printf("\n");
+}
+
